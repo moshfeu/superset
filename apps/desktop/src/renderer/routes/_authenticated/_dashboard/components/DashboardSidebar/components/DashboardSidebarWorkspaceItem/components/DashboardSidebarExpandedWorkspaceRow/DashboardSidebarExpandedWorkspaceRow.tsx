@@ -47,7 +47,8 @@ interface DashboardSidebarExpandedWorkspaceRowProps
 	isBulkSelectable?: boolean;
 	isSelected?: boolean;
 	/** Present when rendered in the Pinned section: shows the project avatar. */
-	pinnedContext?: { projectName: string; projectIconUrl: string | null };
+	/** projectName is null for pinned project-less "session" workspaces. */
+	pinnedContext?: { projectName: string | null; projectIconUrl: string | null };
 	onClick?: MouseEventHandler<HTMLDivElement>;
 	onKeyboardActivate?: KeyboardEventHandler<HTMLDivElement>;
 	onWorkspaceChipsClick?: MouseEventHandler<HTMLDivElement>;
@@ -113,6 +114,10 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 
 		const creationStatusText = isPending ? "Creating…" : null;
 		const isMainWorkspace = workspace.type === "main";
+		// No hover action button on the local main workspace: a stray click on the
+		// minus would remove the project's anchor row. Removal stays available via
+		// the context menu.
+		const isLocalMainWorkspace = isMainWorkspace && hostType === "local-device";
 		const workspaceKindTitle = isMainWorkspace
 			? "Main workspace"
 			: "Worktree workspace";
@@ -257,14 +262,14 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 							<TooltipTrigger asChild>
 								<div className="mr-1.5 flex shrink-0 items-center">
 									<ProjectThumbnail
-										projectName={pinnedContext.projectName}
+										projectName={pinnedContext.projectName ?? "Session"}
 										iconUrl={pinnedContext.projectIconUrl}
 										className="size-3.5 text-[8px]"
 									/>
 								</div>
 							</TooltipTrigger>
 							<TooltipContent side="right" sideOffset={8}>
-								{pinnedContext.projectName}
+								{pinnedContext.projectName ?? "Session"}
 							</TooltipContent>
 						</Tooltip>
 					)}
@@ -317,7 +322,7 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 											{shortcutLabel}
 										</span>
 									)}
-									{isMainWorkspace ? (
+									{isLocalMainWorkspace ? null : isMainWorkspace ? (
 										<Tooltip delayDuration={300}>
 											<TooltipTrigger asChild>
 												<button
