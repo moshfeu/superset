@@ -45,7 +45,7 @@ describe("TerminalLinkManager", () => {
 
 		const linkHandler = terminal.options.linkHandler;
 		expect(linkHandler).toBeTruthy();
-		expect(linkHandler?.allowNonHttpProtocols).toBe(false);
+		expect(linkHandler?.allowNonHttpProtocols).toBe(true);
 
 		const event = {} as MouseEvent;
 		linkHandler?.activate(event, "https://example.com", {
@@ -64,6 +64,64 @@ describe("TerminalLinkManager", () => {
 		expect(onUrlClick).toHaveBeenCalledWith(event, "https://example.com");
 		expect(onLinkHover).toHaveBeenCalledWith(event, { kind: "url" });
 		expect(onLinkLeave).toHaveBeenCalled();
+	});
+
+	it("ignores non-http, non-file OSC 8 schemes", () => {
+		const { terminal } = createMockTerminal();
+		const manager = new TerminalLinkManager(terminal);
+		const onUrlClick = mock();
+		const onFileLinkClick = mock();
+
+		manager.setHandlers({
+			stat: async () => null,
+			onUrlClick,
+			onFileLinkClick,
+		});
+
+		const linkHandler = terminal.options.linkHandler;
+		const event = {} as MouseEvent;
+		linkHandler?.activate(event, "javascript:alert(1)", {
+			start: { x: 1, y: 1 },
+			end: { x: 20, y: 1 },
+		});
+
+		expect(onUrlClick).not.toHaveBeenCalled();
+		expect(onFileLinkClick).not.toHaveBeenCalled();
+	});
+
+	it("resolves file:// OSC 8 hyperlinks through the stat callback before activating", async () => {
+		const { terminal } = createMockTerminal();
+		const manager = new TerminalLinkManager(terminal);
+		const onFileLinkClick = mock();
+		const stat = mock(async (path: string) => {
+			expect(path).toBe("/repo/test/foo.spec.ts");
+			return { isDirectory: false, resolvedPath: "/repo/test/foo.spec.ts" };
+		});
+
+		manager.setHandlers({
+			stat,
+			onUrlClick: mock(),
+			onFileLinkClick,
+		});
+
+		const linkHandler = terminal.options.linkHandler;
+		const event = {} as MouseEvent;
+		linkHandler?.activate(event, "file:///repo/test/foo.spec.ts", {
+			start: { x: 1, y: 1 },
+			end: { x: 20, y: 1 },
+		});
+
+		// activation resolves the path asynchronously before calling back
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onFileLinkClick).toHaveBeenCalledWith(
+			event,
+			expect.objectContaining({
+				resolvedPath: "/repo/test/foo.spec.ts",
+				isDirectory: false,
+			}),
+		);
 	});
 
 	it("clears only the OSC link handler it installed", () => {

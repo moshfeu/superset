@@ -22,6 +22,25 @@ export type LinkHoverInfo =
 	| { kind: "file"; isDirectory: boolean }
 	| { kind: "url" };
 
+const HTTP_URI_PATTERN = /^https?:\/\//i;
+const FILE_URI_PATTERN = /^file:\/\//i;
+
+function isHttpUri(uri: string): boolean {
+	return HTTP_URI_PATTERN.test(uri);
+}
+
+function isFileUri(uri: string): boolean {
+	return FILE_URI_PATTERN.test(uri);
+}
+
+function fileUriToPath(uri: string): string {
+	try {
+		return decodeURIComponent(new URL(uri).pathname);
+	} catch {
+		return decodeURIComponent(uri.replace(FILE_URI_PATTERN, ""));
+	}
+}
+
 /**
  * Link handler callbacks for the v2 terminal.
  */
@@ -145,17 +164,41 @@ export class TerminalLinkManager {
 				onLinkLeave,
 			);
 			this._disposables.push(this._terminal.registerLinkProvider(urlProvider));
+		}
 
-			// xterm always registers its own OSC 8 hyperlink provider first. Without
-			// this, OSC 8 links use xterm's default confirm() + window.open() path,
-			// which is blocked in Electron and also bypasses our link preferences.
+		// xterm always registers its own OSC 8 hyperlink provider first. Without
+		// this, OSC 8 links use xterm's default confirm() + window.open() path,
+		// which is blocked in Electron and also bypasses our link preferences.
+		//
+		// `allowNonHttpProtocols` is on because CLIs (e.g. Claude Code) commonly
+		// wrap file paths in OSC 8 hyperlinks using `file://` URIs — with it off,
+		// xterm silently drops those before `activate`/`hover` ever fire, so the
+		// text renders underlined but is otherwise inert. We only act on `file://`
+		// and `http(s)://` here; every other scheme (`javascript:`, `data:`, etc.)
+		// is ignored, so this doesn't reopen the XSS door the option's doc warns
+		// about.
+		if (handlers.onUrlClick || handlers.onFileLinkClick) {
+			const { onUrlClick, onFileLinkClick } = handlers;
 			this._oscLinkHandler = {
-				allowNonHttpProtocols: false,
+				allowNonHttpProtocols: true,
 				activate: (event, uri) => {
-					onUrlClick(event, uri);
+					if (isFileUri(uri)) {
+						void this._activateFileUri(event, uri, onFileLinkClick);
+						return;
+					}
+					if (isHttpUri(uri)) {
+						onUrlClick?.(event, uri);
+					}
 				},
 				hover: onLinkHover
-					? (event) => onLinkHover(event, { kind: "url" })
+					? (event, uri) => {
+							onLinkHover(
+								event,
+								isFileUri(uri)
+									? { kind: "file", isDirectory: false }
+									: { kind: "url" },
+							);
+						}
 					: undefined,
 				leave: onLinkLeave ? () => onLinkLeave() : undefined,
 			};
@@ -193,5 +236,30 @@ export class TerminalLinkManager {
 			);
 			this._disposables.push(this._terminal.registerLinkProvider(wordDetector));
 		}
+	}
+
+	/**
+	 * Resolve a `file://` OSC 8 URI against the filesystem before handing it
+	 * to `onFileLinkClick`, mirroring how LocalLinkDetector validates paths.
+	 */
+	private async _activateFileUri(
+		event: MouseEvent,
+		uri: string,
+		onFileLinkClick: TerminalLinkHandlers["onFileLinkClick"],
+	): Promise<void> {
+		if (!onFileLinkClick || !this._resolver) return;
+		const resolved = await this._resolver.resolveLink(fileUriToPath(uri));
+		if (!resolved) return;
+		onFileLinkClick(event, {
+			text: uri,
+			startIndex: 0,
+			endIndex: 0,
+			resolvedPath: resolved.path,
+			isDirectory: resolved.isDirectory,
+			row: undefined,
+			col: undefined,
+			rowEnd: undefined,
+			colEnd: undefined,
+		});
 	}
 }
