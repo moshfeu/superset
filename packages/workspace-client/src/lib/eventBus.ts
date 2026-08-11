@@ -17,6 +17,7 @@ type EventType =
 	| "terminal:lifecycle"
 	| "port:changed"
 	| "workspace:changed"
+	| "workspace:create-settled"
 	| "project:changed";
 
 interface FsEventsPayload {
@@ -77,6 +78,16 @@ export interface WorkspaceChangedPayload {
 	occurredAt: number;
 }
 
+type WorkspaceCreateSettledMessage = Extract<
+	ServerMessage,
+	{ type: "workspace:create-settled" }
+>;
+
+export type WorkspaceCreateSettledPayload = Omit<
+	WorkspaceCreateSettledMessage,
+	"type" | "workspaceId"
+>;
+
 type ProjectChangedMessage = Extract<
 	ServerMessage,
 	{ type: "project:changed" }
@@ -107,6 +118,11 @@ type EventListener<T extends EventType> = T extends "fs:events"
 						? (workspaceId: string, payload: PortChangedPayload) => void
 						: T extends "workspace:changed"
 							? (workspaceId: string, payload: WorkspaceChangedPayload) => void
+							: T extends "workspace:create-settled"
+								? (
+										workspaceId: string,
+										payload: WorkspaceCreateSettledPayload,
+									) => void
 							: T extends "project:changed"
 								? (projectId: string, payload: ProjectChangedPayload) => void
 								: never;
@@ -166,7 +182,8 @@ function handleMessage(state: ConnectionState, data: unknown): void {
 			message.type === "agent:meta" ||
 			message.type === "terminal:lifecycle" ||
 			message.type === "port:changed" ||
-			message.type === "workspace:changed"
+			message.type === "workspace:changed" ||
+			message.type === "workspace:create-settled"
 				? message.workspaceId
 				: message.type === "project:changed"
 					? message.projectId
@@ -229,6 +246,12 @@ function handleMessage(state: ConnectionState, data: unknown): void {
 					workspace: message.workspace,
 					occurredAt: message.occurredAt,
 				},
+			);
+		} else if (message.type === "workspace:create-settled") {
+			const { type: _type, workspaceId: _workspaceId, ...payload } = message;
+			(entry.callback as EventListener<"workspace:create-settled">)(
+				message.workspaceId,
+				payload,
 			);
 		} else if (message.type === "project:changed") {
 			(entry.callback as EventListener<"project:changed">)(message.projectId, {

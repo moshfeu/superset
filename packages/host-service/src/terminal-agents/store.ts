@@ -1,6 +1,10 @@
 import { EventEmitter } from "node:events";
 import type { AgentDefinitionId } from "@superset/shared/agent-catalog";
-import type { TerminalAgentBinding, TerminalAgentId } from "./types";
+import type {
+	TerminalAgentBinding,
+	TerminalAgentEndReason,
+	TerminalAgentId,
+} from "./types";
 
 interface RecordEventInput {
 	terminalId: string;
@@ -24,12 +28,40 @@ export interface TerminalAgentBindingListFilter {
 	definitionId?: AgentDefinitionId;
 }
 
-const EXIT_EVENT_TYPES = new Set(["Detached", "exit", "error"]);
+// "Detached" is the agent's own goodbye (SessionEnd hooks, the codex wrapper
+// exit report) — not resumable. "exit"/"error" are terminal-side deaths.
+const END_EVENT_REASONS = new Map<string, TerminalAgentEndReason>([
+	["Detached", "detached"],
+	["exit", "terminal-exited"],
+	["error", "terminal-exited"],
+]);
+
+/**
+ * Hook events can straggle in after the terminal died (async notify
+ * callbacks, in-flight curls). Within this window of the recorded end, only
+ * clear evidence of a NEW session may revive an ended row — a straggler
+ * upsert would erase `endedAt`/`endReason` and destroy the resume candidate.
+ */
+const END_STRAGGLER_WINDOW_MS = 30_000;
 
 export interface TerminalAgentBindingPersistence {
 	load(): TerminalAgentBinding[];
 	upsert(binding: TerminalAgentBinding): void;
 	delete(terminalId: string): void;
+	/**
+	 * Retain the row but stamp `endedAt`/`endReason` so the agent session id
+	 * survives as a resume candidate. Absent → the store falls back to
+	 * deleting (pre-resume behavior).
+	 */
+	markEnded?(
+		terminalId: string,
+		reason: TerminalAgentEndReason,
+		endedAt?: number,
+	): { workspaceId: string } | undefined;
+	/** End state of the terminal's row, if it exists and has ended. */
+	getEnded?(
+		terminalId: string,
+	): { endedAt: number; agentSessionId?: string } | undefined;
 	/**
 	 * Liveness-joined reads (session `active` + workspace-owned). When
 	 * provided, the store serves list/find from here so dead-terminal
@@ -87,8 +119,9 @@ export class TerminalAgentStore extends EventEmitter {
 			cwd,
 		} = input;
 
-		if (EXIT_EVENT_TYPES.has(eventType)) {
-			this.deleteTerminal(terminalId);
+		const endReason = END_EVENT_REASONS.get(eventType);
+		if (endReason) {
+			this.endBinding(terminalId, endReason, occurredAt);
 			return;
 		}
 
@@ -101,6 +134,23 @@ export class TerminalAgentStore extends EventEmitter {
 
 		const existing = this.byTerminal.get(terminalId);
 		if (!agentId && !existing) return;
+
+		// A late event for a dead terminal must not resurrect its ended row
+		// (the upsert would clear the resume state). Revive only on a fresh
+		// session start, a different agent session id, or an event well past
+		// the end (an agent without SessionStart hooks launched later).
+		if (!existing && this.persistence?.getEnded) {
+			const ended = this.persistence.getEnded(terminalId);
+			if (
+				ended !== undefined &&
+				eventType !== "Attached" &&
+				(agentSessionId === undefined ||
+					agentSessionId === ended.agentSessionId) &&
+				occurredAt - ended.endedAt <= END_STRAGGLER_WINDOW_MS
+			) {
+				return;
+			}
+		}
 
 		const nextAgentId = agentId ?? existing?.agentId;
 		if (!nextAgentId) return;
@@ -136,7 +186,7 @@ export class TerminalAgentStore extends EventEmitter {
 	}
 
 	markTerminalExited(terminalId: string): void {
-		this.deleteTerminal(terminalId);
+		this.endBinding(terminalId, "terminal-exited", Date.now());
 	}
 
 	/**
@@ -249,12 +299,28 @@ export class TerminalAgentStore extends EventEmitter {
 		return best ? this.withLiveMeta(best) : undefined;
 	}
 
-	private deleteTerminal(terminalId: string): void {
+	/**
+	 * Drop the binding from the live view. With markEnded persistence the row
+	 * is retained (stamped ended) so `agentSessionId` survives for resume;
+	 * without it, hard-delete as before.
+	 */
+	private endBinding(
+		terminalId: string,
+		reason: TerminalAgentEndReason,
+		endedAt: number,
+	): void {
 		const existing = this.byTerminal.get(terminalId);
-		if (!existing) return;
 		this.byTerminal.delete(terminalId);
 		this.liveMeta.delete(terminalId);
-		this.persistence?.delete(terminalId);
-		this.emit("change", existing.workspaceId);
+
+		let marked: { workspaceId: string } | undefined;
+		if (this.persistence?.markEnded) {
+			marked = this.persistence.markEnded(terminalId, reason, endedAt);
+		} else if (existing) {
+			this.persistence?.delete(terminalId);
+		}
+
+		const workspaceId = marked?.workspaceId ?? existing?.workspaceId;
+		if (workspaceId) this.emit("change", workspaceId);
 	}
 }

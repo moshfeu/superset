@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
 import { useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useRef } from "react";
+import { GoGitPullRequest } from "react-icons/go";
 import { HiOutlineClipboardDocumentList } from "react-icons/hi2";
 import { LuClock, LuLayers, LuPlus, LuSearch } from "react-icons/lu";
 import {
@@ -29,9 +30,14 @@ import { NavigationControls } from "renderer/routes/_authenticated/_dashboard/co
 import { SidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/SidebarToggle";
 import { useFailedAutomations } from "renderer/routes/_authenticated/_dashboard/hooks/useFailedAutomations";
 import {
+	pullRequestsSearchFromFilters,
+	usePullRequestsFilterStore,
+} from "renderer/routes/_authenticated/_dashboard/pull-requests/stores/pullRequestsFilterStore";
+import {
 	tasksSearchFromFilters,
 	useTasksFilterStore,
 } from "renderer/routes/_authenticated/_dashboard/tasks/stores/tasks-filter-state";
+import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 import { STROKE_WIDTH_THICK } from "renderer/screens/main/components/WorkspaceSidebar/constants";
 import {
 	useOpenEmptyProjectModal,
@@ -95,11 +101,24 @@ export function DashboardSidebarHeader({
 	const matchRoute = useMatchRoute();
 	const { gateFeature } = usePaywall();
 	const isWorkspacesListOpen = !!matchRoute({ to: "/v2-workspaces" });
-	const onV2WorkspaceRoute = !!matchRoute({
+	const v2WorkspaceMatch = matchRoute({
 		to: "/v2-workspace/$workspaceId",
 		fuzzy: true,
 	});
+	const onV2WorkspaceRoute = v2WorkspaceMatch !== false;
+	// Pre-select the viewed workspace's project in the new-workspace modal.
+	const { workspaces: hostWorkspaces } = useHostWorkspaces();
+	const activeProjectId =
+		v2WorkspaceMatch !== false
+			? (hostWorkspaces.find(
+					(workspace) => workspace.id === v2WorkspaceMatch.workspaceId,
+				)?.projectId ?? undefined)
+			: undefined;
 	const isTasksOpen = !!matchRoute({ to: "/tasks", fuzzy: true });
+	const isPullRequestsOpen = !!matchRoute({
+		to: "/pull-requests",
+		fuzzy: true,
+	});
 	const isAutomationsOpen = !!matchRoute({ to: "/automations", fuzzy: true });
 	const { myFailedCount } = useFailedAutomations();
 
@@ -108,9 +127,17 @@ export function DashboardSidebarHeader({
 		assignee: lastAssignee,
 		search: lastSearch,
 		typeTab: lastTypeTab,
-		projectFilter: lastProjectFilter,
+		projectFilters: lastProjectFilters,
 		linearProjectFilter: lastLinearProjectFilter,
+		includeClosedIssues: lastIncludeClosedIssues,
 	} = useTasksFilterStore();
+	const {
+		search: lastPullRequestsSearch,
+		projectFilters: lastPullRequestsProjectFilters,
+		authorFilter: lastPullRequestsAuthorFilter,
+		reviewFilter: lastPullRequestsReviewFilter,
+		includeClosed: lastPullRequestsIncludeClosed,
+	} = usePullRequestsFilterStore();
 
 	const handleWorkspacesClick = () => {
 		navigate({ to: "/v2-workspaces" });
@@ -129,8 +156,24 @@ export function DashboardSidebarHeader({
 					assignee: lastAssignee,
 					search: lastSearch,
 					typeTab: lastTypeTab,
-					projectFilter: lastProjectFilter,
+					projectFilters: lastProjectFilters,
 					linearProjectFilter: lastLinearProjectFilter,
+					includeClosedIssues: lastIncludeClosedIssues,
+				}),
+			});
+		});
+	};
+
+	const handlePullRequestsClick = () => {
+		gateFeature(GATED_FEATURES.TASKS, () => {
+			navigate({
+				to: "/pull-requests",
+				search: pullRequestsSearchFromFilters({
+					search: lastPullRequestsSearch,
+					projectFilters: lastPullRequestsProjectFilters,
+					authorFilter: lastPullRequestsAuthorFilter,
+					reviewFilter: lastPullRequestsReviewFilter,
+					includeClosed: lastPullRequestsIncludeClosed,
 				}),
 			});
 		});
@@ -159,7 +202,7 @@ export function DashboardSidebarHeader({
 						<TooltipTrigger asChild>
 							<button
 								type="button"
-								onClick={() => openModal()}
+								onClick={() => openModal(activeProjectId)}
 								className="flex size-7 items-center justify-center rounded-md bg-fill-hover/60 [.light_&]:bg-fill-hover text-muted-foreground transition-colors hover:bg-fill-selected [.light_&]:hover:bg-fill-selected"
 							>
 								<div className="flex size-5 items-center justify-center rounded bg-fill-selected">
@@ -246,6 +289,8 @@ export function DashboardSidebarHeader({
 							<button
 								type="button"
 								onClick={handleTasksClick}
+								aria-label="Tasks"
+								aria-current={isTasksOpen ? "page" : undefined}
 								className={cn(
 									"flex size-7 items-center justify-center rounded-md transition-colors",
 									isTasksOpen
@@ -256,7 +301,27 @@ export function DashboardSidebarHeader({
 								<HiOutlineClipboardDocumentList className="size-3.5" />
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="right">Tasks & PRs</TooltipContent>
+						<TooltipContent side="right">Tasks</TooltipContent>
+					</Tooltip>
+
+					<Tooltip delayDuration={300}>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								onClick={handlePullRequestsClick}
+								aria-label="Pull requests"
+								aria-current={isPullRequestsOpen ? "page" : undefined}
+								className={cn(
+									"flex size-7 items-center justify-center rounded-md transition-colors",
+									isPullRequestsOpen
+										? "bg-fill-selected text-muted-foreground"
+										: "text-muted-foreground hover:bg-fill-hover",
+								)}
+							>
+								<GoGitPullRequest className="size-3.5" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">Pull requests</TooltipContent>
 					</Tooltip>
 
 					<DropdownMenu>
@@ -337,7 +402,7 @@ export function DashboardSidebarHeader({
 
 			<button
 				type="button"
-				onClick={() => openModal()}
+				onClick={() => openModal(activeProjectId)}
 				className="group flex w-full items-center gap-2 rounded-md bg-fill-hover/60 [.light_&]:bg-fill-hover px-1 py-1 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-fill-selected [.light_&]:hover:bg-fill-selected hover:text-foreground"
 			>
 				<div className="flex size-5 shrink-0 items-center justify-center rounded bg-fill-selected">
@@ -410,6 +475,8 @@ export function DashboardSidebarHeader({
 			<button
 				type="button"
 				onClick={handleTasksClick}
+				aria-label="Tasks"
+				aria-current={isTasksOpen ? "page" : undefined}
 				className={cn(
 					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
 					isTasksOpen
@@ -418,7 +485,23 @@ export function DashboardSidebarHeader({
 				)}
 			>
 				<HiOutlineClipboardDocumentList className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="flex-1 text-left">Tasks & PRs</span>
+				<span className="flex-1 text-left">Tasks</span>
+			</button>
+
+			<button
+				type="button"
+				onClick={handlePullRequestsClick}
+				aria-label="Pull requests"
+				aria-current={isPullRequestsOpen ? "page" : undefined}
+				className={cn(
+					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
+					isPullRequestsOpen
+						? "bg-fill-selected text-foreground"
+						: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
+				)}
+			>
+				<GoGitPullRequest className="size-3.5 shrink-0 text-muted-foreground" />
+				<span className="flex-1 text-left">Pull requests</span>
 			</button>
 		</div>
 	);

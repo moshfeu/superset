@@ -1,12 +1,13 @@
 import { createNodeWebSocket } from "@hono/node-ws";
 import { trpcServer } from "@hono/trpc-server";
 import { Octokit } from "@octokit/rest";
-import { ChatService } from "@superset/chat/server/desktop";
+import { ChatService } from "@superset/chat-legacy/server/desktop";
 import { eq } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createApiClient } from "./api";
+import { createChatV3Mount, registerChatV3Routes } from "./chat-v3";
 import { createDb, type HostDb } from "./db";
 import { workspaces } from "./db/schema";
 import { EventBus, GitWatcher, registerEventBusRoute } from "./events";
@@ -18,6 +19,7 @@ import {
 	registerAcpSessionStreamRoute,
 	SqliteAcpSessionPersistence,
 } from "./runtime/acp-sessions";
+import { runArchivedWorkspaceReconcile } from "./runtime/archived-workspace-reconcile";
 import { ChatRuntimeManager } from "./runtime/chat";
 import { WorkspaceFilesystemManager } from "./runtime/filesystem";
 import type { GitCredentialProvider } from "./runtime/git";
@@ -77,6 +79,7 @@ export interface CreateAppResult {
 	injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
 	api: ApiClient;
 	db: HostDb;
+	eventBus: EventBus;
 	dispose: () => Promise<void>;
 }
 
@@ -169,6 +172,13 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 			persistence: new SqliteAcpSessionPersistence(db),
 		});
 
+	// Chat v3 runtime (plans/chat-v3-pane-mount.md). Registered unconditionally:
+	// the routes sit behind the same auth as every other host route, and the
+	// runtime is built on first request, so chat.db is never created on a host
+	// nobody chats with. Exposure is a client concern — the renderer gates the
+	// pane on the `chat-v3` PostHog flag.
+	const chatV3 = createChatV3Mount({ db, dbPath: config.dbPath });
+
 	const runtime = {
 		acpSessions,
 		acpSessionsEnabled,
@@ -206,10 +216,10 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 	// Hygiene only — reads hide defunct bindings via the session-liveness
 	// join regardless, so a failure here must not block startup.
 	try {
-		terminalAgentPersistence.deleteDefunct();
+		terminalAgentPersistence.sweepDefunct();
 	} catch (error) {
 		console.warn(
-			"[terminal-agents] failed to prune defunct binding rows",
+			"[terminal-agents] failed to sweep defunct binding rows",
 			error,
 		);
 	}
@@ -254,6 +264,23 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 		}).catch((err) => {
 			console.warn("[host-service] main-workspace sweep failed:", err);
 		});
+		// Finish any delete the previous process crashed out of (archived row
+		// whose worktree still exists).
+		await runArchivedWorkspaceReconcile({
+			git,
+			credentials: providers.credentials,
+			github,
+			execGh,
+			api,
+			db,
+			runtime,
+			eventBus,
+			terminalAgentStore,
+			organizationId: config.organizationId,
+			isAuthenticated: true,
+		}).catch((err) => {
+			console.warn("[host-service] archived-workspace reconcile failed:", err);
+		});
 	})();
 
 	const wsAuth: MiddlewareHandler = async (c, next) => {
@@ -267,6 +294,7 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 	app.use("/terminal/*", wsAuth);
 	app.use("/events", wsAuth);
 	app.use("/acp-sessions/*", wsAuth);
+	app.use("/chat-v3/*", wsAuth);
 
 	registerEventBusRoute({ app, eventBus, upgradeWebSocket });
 	registerWorkspaceTerminalRoute({
@@ -282,6 +310,7 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 			upgradeWebSocket,
 		});
 	}
+	registerChatV3Routes({ app, db, mount: chatV3, upgradeWebSocket });
 
 	app.use(
 		"/trpc/*",
@@ -324,6 +353,11 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 			console.warn("[host-service] acpSessions.dispose failed:", err);
 		}
 		try {
+			await chatV3.dispose();
+		} catch (err) {
+			console.warn("[host-service] chatV3.dispose failed:", err);
+		}
+		try {
 			eventBus.close();
 		} catch (err) {
 			console.warn("[host-service] eventBus.close failed:", err);
@@ -347,5 +381,5 @@ export function createApp(options: CreateAppOptions): CreateAppResult {
 		}
 	};
 
-	return { app, injectWebSocket, api, db, dispose };
+	return { app, injectWebSocket, api, db, eventBus, dispose };
 }
