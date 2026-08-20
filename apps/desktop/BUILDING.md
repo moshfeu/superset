@@ -12,6 +12,22 @@ This skips environment variable validation and the sign-in screen. Desktop chat 
 
 When building for release, make sure `node-pty` is built for the correct architecture with `bun run install:deps`, then run `bun run release`.
 
+# macOS local build
+
+From `apps/desktop`:
+
+```bash
+bun run package:local
+```
+
+Use this instead of the plain `build`/`package` scripts for a locally packaged
+macOS app. It gives the local build its own bundle identifier
+(`com.superset.desktop.local`) and signs it with a stable local certificate,
+so it doesn't collide with an installed production `Superset.app` on macOS
+permission grants (Documents folder, etc.). See
+`docs/MACOS_LOCAL_BUILD_TCC_PROMPTS.md` if macOS keeps re-prompting for
+Documents folder access on a local build.
+
 # Linux (AppImage) local build
 
 From `apps/desktop`:
